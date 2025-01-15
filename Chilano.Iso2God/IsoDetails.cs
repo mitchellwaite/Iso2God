@@ -47,21 +47,16 @@ internal class IsoDetails : BackgroundWorker
         }
         IsoDetailsPlatform isoDetailsPlatform;
 
-        if(iso.Exists("default.xex") && iso.Exists("default.xbe"))
-        {
-            DialogResult result = MessageBox.Show("Dual platform game detected. Would you like to create an Xbox 360 GOD package?", "Dual platform game detected", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-            if(result == DialogResult.Yes)
-            {
-                isoDetailsPlatform = IsoDetailsPlatform.Xbox360;
-            }
-            else
-            {
-                isoDetailsPlatform = IsoDetailsPlatform.Xbox;
-            }
-        }
-        else if (iso.Exists("default.xex"))
+        if (iso.Exists("default.xex"))
         {
             isoDetailsPlatform = IsoDetailsPlatform.Xbox360;
+
+            if(iso.Exists("default.xbe"))
+            {
+                // This is a dual platform game (Original Xbox and Xbox 360 on the same disc)
+                // Warn the user we're going to create an xbox 360 GOD package, discarding the original xbox version
+                MessageBox.Show("Dual platform game detected (both Xbox 360 and original Xbox). An Xbox 360 GOD package will be created and the original Xbox version will be discarded.", "Dual platform game", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
         else
         {
