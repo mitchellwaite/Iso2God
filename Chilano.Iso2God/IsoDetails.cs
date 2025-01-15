@@ -2,7 +2,6 @@ using Chilano.Xbox360.Graphics;
 using Chilano.Xbox360.IO;
 using Chilano.Xbox360.Iso;
 using Chilano.Xbox360.Xbe;
-using Chilano.Xbox360.Xdbf;
 using Chilano.Xbox360.Xex;
 using System;
 using System.Collections.Generic;
@@ -13,7 +12,10 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
+using System.Windows.Forms;
 using static System.Collections.Specialized.BitVector32;
+using System.Xml;
+using System.Text.RegularExpressions;
 
 namespace Chilano.Iso2God;
 
@@ -44,7 +46,20 @@ internal class IsoDetails : BackgroundWorker
             return;
         }
         IsoDetailsPlatform isoDetailsPlatform;
-        if (iso.Exists("default.xex"))
+
+        if(iso.Exists("default.xex") && iso.Exists("default.xbe"))
+        {
+            DialogResult result = MessageBox.Show("Dual platform game detected. Would you like to create an Xbox 360 GOD package?", "Dual platform game detected", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if(result == DialogResult.Yes)
+            {
+                isoDetailsPlatform = IsoDetailsPlatform.Xbox360;
+            }
+            else
+            {
+                isoDetailsPlatform = IsoDetailsPlatform.Xbox;
+            }
+        }
+        else if (iso.Exists("default.xex"))
         {
             isoDetailsPlatform = IsoDetailsPlatform.Xbox360;
         }
@@ -185,6 +200,10 @@ internal class IsoDetails : BackgroundWorker
         byte[] array = null;
         string text = null;
         string text2 = null;
+
+        String xexResString = "";
+        XmlDocument xexResources = new XmlDocument();
+
         ReportProgress(0, new IsoDetailsResults(IsoDetailsResultsType.Progress, "Locating default.xex..."));
         try
         {
@@ -228,13 +247,24 @@ internal class IsoDetails : BackgroundWorker
             return;
         }
         process.StartInfo.WorkingDirectory = text2;
-        process.StartInfo.Arguments = "-d . default.xex";
+        process.StartInfo.Arguments = "-xa default.xex";
         process.StartInfo.UseShellExecute = false;
-        process.StartInfo.RedirectStandardOutput = false;
+        process.StartInfo.RedirectStandardOutput = true;
         process.StartInfo.CreateNoWindow = true;
+
+        // Standard redirection buffers are too small and xextool will hang.
+        process.OutputDataReceived += (procSender, procE) =>
+        {
+            if (procE.Data != null)
+            {
+                xexResString += procE.Data;
+            }
+        };
+
         try
         {
             process.Start();
+            process.BeginOutputReadLine();
             process.WaitForExit();
             process.Close();
         }
@@ -243,59 +273,58 @@ internal class IsoDetails : BackgroundWorker
             ReportProgress(0, new IsoDetailsResults(IsoDetailsResultsType.Error, "Could not launch XexTool!"));
             return;
         }
-        if (File.Exists(text2 + isoDetailsResults.TitleID))
+
+        // Load the output from xextool into an xml document
+        ReportProgress(0, new IsoDetailsResults(IsoDetailsResultsType.Progress, "Parsing xextool output..."));
+
+        try
         {
-            Xdbf xdbf = new Xdbf(File.ReadAllBytes(text2 + isoDetailsResults.TitleID));
-            ReportProgress(0, new IsoDetailsResults(IsoDetailsResultsType.Progress, "Extracting thumbnail..."));
-            try
+            // Fix any wonky negative character codes from xextool
+            foreach (Match m in Regex.Matches(xexResString, "&#(-\\d+);"))
             {
-                byte[] resource = xdbf.GetResource(XdbfResource.Thumb, XdbfResourceType.TitleInfo);
-                MemoryStream stream = new MemoryStream(resource);
-                Image image = Image.FromStream(stream);
-                isoDetailsResults.Thumbnail = (Image)image.Clone();
-                isoDetailsResults.RawThumbnail = (byte[])resource.Clone();
-                image.Dispose();
+                string s = m.Value.Substring(2, m.Value.Length - 3);
+
+                byte intVal = (byte)sbyte.Parse(s);
+
+                xexResString = xexResString.Replace(m.Value, "&#" + intVal.ToString() + ";");
             }
-            catch (Exception)
-            {
-                try
-                {
-                    byte[] resource2 = xdbf.GetResource(XdbfResource.Thumb, XdbfResourceType.Achievement);
-                    MemoryStream stream2 = new MemoryStream(resource2);
-                    Image image2 = Image.FromStream(stream2);
-                    isoDetailsResults.Thumbnail = (Image)image2.Clone();
-                    isoDetailsResults.RawThumbnail = (byte[])resource2.Clone();
-                    image2.Dispose();
-                }
-                catch (Exception)
-                {
-                    ReportProgress(0, new IsoDetailsResults(IsoDetailsResultsType.Error, "Couldn't find thumbnail in XDBF. Possibly corrupt XDBF?"));
-                }
-            }
-            try
-            {
-                MemoryStream memoryStream = new MemoryStream(xdbf.GetResource(1u, 3));
-                memoryStream.Seek(17L, SeekOrigin.Begin);
-                int count = memoryStream.ReadByte();
-                isoDetailsResults.Name = Encoding.UTF8.GetString(memoryStream.ToArray(), 18, count);
-                memoryStream.Close();
-            }
-            catch (Exception)
-            {
-                try
-                {
-                    MemoryStream memoryStream2 = new MemoryStream(xdbf.GetResource(1u, 0));
-                    memoryStream2.Seek(17L, SeekOrigin.Begin);
-                    int count2 = memoryStream2.ReadByte();
-                    isoDetailsResults.Name = Encoding.UTF8.GetString(memoryStream2.ToArray(), 18, count2);
-                    memoryStream2.Close();
-                }
-                catch (Exception)
-                {
-                    isoDetailsResults.Name = "Unable to read name.";
-                }
-            }
+
+            // Load an XML document, stripping everything before the first open bracket
+            // from the xextool output
+            xexResources.LoadXml(xexResString.Substring(xexResString.IndexOf('<')));
         }
+        catch
+        {
+            ReportProgress(0, new IsoDetailsResults(IsoDetailsResultsType.Progress, "Failed to parse xextool output!"));
+            return;
+        }
+
+        ReportProgress(0, new IsoDetailsResults(IsoDetailsResultsType.Progress, "Extracting name..."));
+        try
+        {
+            isoDetailsResults.Name = xexResources.DocumentElement.SelectSingleNode("/XexInfo/GameName").InnerText;
+        }
+        catch (Exception)
+        {
+            isoDetailsResults.Name = "Unable to read name.";
+        }
+        
+        ReportProgress(0, new IsoDetailsResults(IsoDetailsResultsType.Progress, "Extracting thumbnail..."));
+
+        try
+        {
+            byte[] resource = Convert.FromBase64String(xexResources.DocumentElement.SelectSingleNode("/XexInfo/GameIcon").InnerText);
+            MemoryStream stream = new MemoryStream(resource);
+            Image image = Image.FromStream(stream);
+            isoDetailsResults.Thumbnail = (Image)image.Clone();
+            isoDetailsResults.RawThumbnail = (byte[])resource.Clone();
+            image.Dispose();
+        }
+        catch (Exception)
+        {
+            ReportProgress(0, new IsoDetailsResults(IsoDetailsResultsType.Error, "Couldn't find thumbnail in xextool output."));
+        }
+
         e.Result = isoDetailsResults;
     }
 }
